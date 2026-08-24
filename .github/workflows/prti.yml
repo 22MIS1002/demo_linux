@@ -96,7 +96,7 @@ jobs:
                 context: STATUS_CONTEXT,
                 state: 'success',
                 description: 'PRTI enforcement skipped for bot-authored PR',
-                target_url: `https://github.com/${owner}/${repo}/pull/${prNumber}`
+                target_url: `https://github.com/${owner}/${repo}/actions/runs/${{ github.run_id }}`
               });
               return;
             }
@@ -525,7 +525,7 @@ jobs:
               context: STATUS_CONTEXT,
               state: allValid ? 'success' : 'failure',
               description,
-              target_url: `https://github.com/${owner}/${repo}/pull/${prNumber}`
+              target_url: `https://github.com/${owner}/${repo}/actions/runs/${{ github.run_id }}`
             });
 
             if (allValid) {
