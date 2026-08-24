@@ -147,13 +147,12 @@ jobs:
                   '> **What you need to do:**',
                   '> - Submit an updated **PRTI checklist** and **Review `.md` attachment** as a **new comment** for the latest code changes.',
                   '> ',
-                  '> **Bypass:** If you believe this invalidation is incorrect (e.g., the new commits are trivial/non-functional changes), edit the same comments and remove the invalid flag message markdown content to re-trigger validation. [You can refer 'PRTI_enforcement.md' for more details]',
+                  `> **Bypass:** If you believe this invalidation is incorrect (e.g., the new commits are trivial/non-functional changes), edit the same comments and remove the invalid flag message markdown content to re-trigger validation. [You can refer 'PRTI_enforcement.md' for more details]`,
                   '',
                   '---',
                   '### 📜 Original Submission (Historical Context):',
                   ''
                 ].join('\n');
-
                 await github.rest.issues.updateComment({
                   owner, repo, comment_id: comment.id, body: redWarningBanner + body
                 });
