@@ -8,8 +8,7 @@ on:
       - synchronize
       - ready_for_review
     branches:
-      - develop
-      - release/**
+      - main
   issue_comment:
     types:
       - created
@@ -23,7 +22,7 @@ concurrency:
 jobs:
   call-prti-enforcement:
     if: github.event_name == 'pull_request' || (github.event_name == 'issue_comment' && github.event.issue.pull_request)
-    uses: Videojet-Veralto/xpf-devops/.github/workflows/prti-enforcement-reusable.yml@main
+    uses: 22MIS1002/demo_devops/.github/workflows/prti-enforcement-reusable.yml@main
     with:
       pr_number: ${{ github.event.pull_request.number || github.event.issue.number }}
       # head_sha: ${{ github.event.pull_request.head.sha || github.event.after || '' }}
