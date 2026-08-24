@@ -1,0 +1,535 @@
+name: PRTI Enforcement
+'on':
+  pull_request:
+    types:
+      - opened
+      - edited
+      - reopened
+      - synchronize
+      - ready_for_review
+    branches:
+      - main
+  issue_comment:
+    types:
+      - created
+      - edited
+      - deleted
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  statuses: write
+concurrency:
+  group: prti-enforcement-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: false
+jobs:
+  prti-check:
+    if: github.event_name == 'pull_request' || (github.event_name == 'issue_comment' && github.event.issue.pull_request)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Validate PRTI data & Review attachment, update sticky comment, set commit status
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const MARKER = '<!-- prti-reminder-sticky -->';
+            const INVALIDATED_FLAG = '<!-- prti-invalidated -->';
+            const STATUS_CONTEXT = 'PRTI Check';
+            const { owner, repo } = context.repo;
+
+            // Loop guard: skip only when the BOT edits/creates its OWN sticky comment.
+            // A 'deleted' event must still run so the sticky comment can be recreated.
+            if (context.eventName === 'issue_comment' && context.payload.comment) {
+              const c = context.payload.comment;
+              const senderLogin = context.payload.sender ? context.payload.sender.login : '';
+              const isBotSender = senderLogin === 'github-actions[bot]';
+              const isStickyComment = (c.body || '').includes(MARKER);
+              const isInvalidationEdit = (c.body || '').includes(INVALIDATED_FLAG);
+
+              // 'deleted' must always run so a removed sticky comment can be recreated.
+              if (isBotSender && (isStickyComment || isInvalidationEdit) && context.payload.action !== 'deleted') {
+                core.info('Sticky comment written by this workflow. Skipping to avoid a loop.');
+                return;
+              }
+            }
+
+            let prNumber;
+
+            if (context.eventName === 'issue_comment') {
+              prNumber = context.payload.issue.number;
+            } else {
+              prNumber = context.payload.pull_request.number;
+            }
+
+            const { data: pr } = await github.rest.pulls.get({
+              owner, repo, pull_number: prNumber
+            });
+
+            // Scope: enforce only on PRs targeting 'develop' or any 'release/**' branch.
+            // This MUST mirror the `on: pull_request: branches:` filter above, otherwise
+            // an in-scope PR would trigger the workflow but never receive a commit status
+            // and would hang forever on the required check.
+            // Re-checked here because issue_comment events are NOT branch-filterable by YAML.
+            const baseRef = pr.base.ref;
+            if (baseRef !== 'main') {
+              core.info(`Base branch '${baseRef}' is out of scope for PRTI enforcement. Skipping.`);
+              return;
+            }
+
+            // Skip bot-authored PRs (dependabot, github-actions, Copilot, SVN sync automation, etc.).
+            // Bots cannot supply PRTI data or a review .md file, so enforcing would block them forever.
+            // A 'success' status IS written (rather than simply returning) so that the required
+            // check is satisfied instead of being left permanently in "Expected — waiting for status".
+            const prAuthor = pr.user ? pr.user.login : '';
+            const prAuthorType = pr.user ? pr.user.type : '';
+            // Add non-'Bot'-typed service/machine accounts (e.g. PAT-backed automation users) here.
+            const BOT_ALLOWLIST = [
+              'dependabot[bot]',
+              'github-actions[bot]',
+              'copilot-swe-agent[bot]'
+            ];
+
+            if (prAuthorType === 'Bot' || prAuthor.endsWith('[bot]') || BOT_ALLOWLIST.includes(prAuthor)) {
+              core.info(`PR authored by bot '${prAuthor}'. Skipping PRTI enforcement and auto-passing the check.`);
+              await github.rest.repos.createCommitStatus({
+                owner, repo, sha: pr.head.sha,
+                context: STATUS_CONTEXT,
+                state: 'success',
+                description: 'PRTI enforcement skipped for bot-authored PR',
+                target_url: `https://github.com/${owner}/${repo}/pull/${prNumber}`
+              });
+              return;
+            }
+
+            const headSha = pr.head.sha;
+            const author = pr.user ? pr.user.login : 'there';
+
+            let comments = await github.paginate(
+              github.rest.issues.listComments,
+              { owner, repo, issue_number: prNumber, per_page: 100 }
+            );
+
+            const isSynchronize = context.eventName === 'pull_request' && context.payload.action === 'synchronize';
+            const prtiRegex = /PR\s*Time|PR\s*Defects|TI\s*Time/i;
+            const reviewRegex = /\[([^\]]+\.md)\]\((https?:\/\/[^\s)]+)\)/i;
+
+            // 1. Label older PRTI comments as INVALIDATED on new commits
+            if (isSynchronize) {
+              core.info('New commit(s) pushed. Marking previous PRTI comments as invalidated...');
+              const prtiCommentsToInvalidate = comments.filter(c =>
+                c.user &&
+                !(c.body || '').includes(MARKER) &&
+                !(c.body || '').includes(INVALIDATED_FLAG) &&
+                (prtiRegex.test(c.body || '') || reviewRegex.test(c.body || ''))
+              );
+
+              for (const comment of prtiCommentsToInvalidate) {
+                const body = comment.body || '';
+                const hasPrti = prtiRegex.test(body);
+                const hasReview = reviewRegex.test(body);
+
+                let commentTypeLabel;
+                if (hasPrti && hasReview) {
+                  commentTypeLabel = 'PRTI checklist and Review `.md` attachment';
+                } else if (hasPrti) {
+                  commentTypeLabel = 'PRTI checklist';
+                } else {
+                  commentTypeLabel = 'Review `.md` attachment';
+                }
+
+                const redWarningBanner = [
+                  INVALIDATED_FLAG,
+                  '> [!CAUTION]',
+                  '> # 🚨 INVALIDATED — NEW COMMITS DETECTED',
+                  `> **This ${commentTypeLabel} submission belonged to a previous commit revision and is NO LONGER VALID.**`,
+                  '> New commits have been pushed to this PR since this comment was made.',
+                  '> ',
+                  '> **What you need to do:**',
+                  '> - Submit an updated **PRTI checklist** and **Review `.md` attachment** as a **new comment** for the latest code changes.',
+                  '> ',
+                  `> **Bypass:** If you believe this invalidation is incorrect (e.g., the new commits are trivial/non-functional changes), edit the same comments and remove the invalid flag message markdown content to re-trigger validation. [You can refer 'PRTI_enforcement.md' for more details]`,
+                  '',
+                  '---',
+                  '### 📜 Original Submission (Historical Context):',
+                  ''
+                ].join('\n');
+                await github.rest.issues.updateComment({
+                  owner, repo, comment_id: comment.id, body: redWarningBanner + body
+                });
+                core.info(`Marked comment ID: ${comment.id} as invalidated (type: ${commentTypeLabel}).`);
+              }
+
+              comments = await github.paginate(
+                github.rest.issues.listComments,
+                { owner, repo, issue_number: prNumber, per_page: 100 }
+              );
+            }
+
+            // 2. Scan all active comments from any non-bot user
+            const BOT_COMMENT_LOGINS = [
+              'github-actions[bot]',
+              'dependabot[bot]',
+              'copilot-swe-agent[bot]'
+            ];
+
+            const activeComments = comments
+              .filter(c => c.user)
+              .filter(c => {
+                const login = c.user.login || '';
+                const type = c.user.type || '';
+                return type !== 'Bot' &&
+                       !login.endsWith('[bot]') &&
+                       !BOT_COMMENT_LOGINS.includes(login);
+              })
+              .filter(c => !(c.body || '').includes(MARKER))
+              .filter(c => !(c.body || '').includes(INVALIDATED_FLAG))
+              .map(c => c.body || '');
+
+            const textSources = [...activeComments.reverse()];
+
+            // Scans all active non-bot comments (most recent first) and returns
+            // the latest value matching the regex - from any commenter, not just the PR author.
+            function getLatestValue(regex) {
+              for (const text of textSources) {
+                const match = text.match(regex);
+                if (match && match[1] !== undefined) return match[1].trim();
+              }
+              return null;
+            }
+
+            // ==========================================
+            // LEVEL 1: PRTI Data Validation
+            // ==========================================
+            const checks = [
+              { label: 'PR Time',    re: /PR\s*Time\s*:\s*(.*)$/im,    type: 'time' },
+              { label: 'PR Defects', re: /PR\s*Defects\s*:\s*(.*)$/im, type: 'number' },
+              { label: 'TI Time',    re: /TI\s*Time\s*:\s*(.*)$/im,    type: 'time' },
+            ];
+
+            const level1Errors = [];
+
+            for (const c of checks) {
+              const rawValue = getLatestValue(c.re);
+
+              if (rawValue === null || rawValue === '') {
+                level1Errors.push(`${c.label} (Empty/Missing)`);
+                continue;
+              }
+              if (/^<.*>$/i.test(rawValue) || /^(n\/a|na|tbd|todo|\?+)$/i.test(rawValue)) {
+                level1Errors.push(`${c.label} (Invalid placeholder: "${rawValue}")`);
+                continue;
+              }
+
+              if (c.type === 'number') {
+                if (/^-/.test(rawValue)) {
+                  level1Errors.push(`${c.label} (Cannot be negative: "${rawValue}")`);
+                } else if (!/^\d+$/.test(rawValue)) {
+                  level1Errors.push(`${c.label} (Must be a non-negative number, e.g., 0)`);
+                }
+              } else if (c.type === 'time') {
+                if (/^-/.test(rawValue)) {
+                  level1Errors.push(`${c.label} (Cannot be negative: "${rawValue}")`);
+                } else {
+                  // Accepted formats (case-insensitive):
+                  //   2h | 2hours | 2hour
+                  //   30m | 30min | 30mins | 30minutes | 30minute
+                  //   45  (bare number, treated as minutes)
+                  //   1h 30m | 1hour 30minutes | 2h 15mins  (combined)
+                  const timeRegex = /^\d+\s*(hours?|h)\s*(\d+\s*(minutes?|mins?|m))?$|^\d+\s*(minutes?|mins?|m)$|^\d+$/i;
+                  if (!timeRegex.test(rawValue)) {
+                    level1Errors.push(
+                      `${c.label} (Invalid time format: "${rawValue}". ` +
+                      `Accepted formats: 2h, 30m, 2h 30m, 2hours, 30minutes, 45)`
+                    );
+                  }
+                }
+              }
+            }
+
+            const isLevel1Passed = level1Errors.length === 0;
+            if (isLevel1Passed) {
+              core.info('✅ Level 1 Check (PRTI Data): PASSED');
+            } else {
+              core.warning(`❌ Level 1 Check (PRTI Data): FAILED (${level1Errors.join(', ')})`);
+            }
+
+            // ==========================================
+            // LEVEL 2: Review (.md) Attachment Validation
+            // ==========================================
+
+            const level2Errors = [];
+            const attachmentRegex = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/gi;
+
+            core.info('Starting Level 2 attachment check independently of Level 1...');
+
+            let foundMdAttachment = null;
+
+            for (const text of textSources) {
+              let match;
+              attachmentRegex.lastIndex = 0;
+
+              while ((match = attachmentRegex.exec(text)) !== null) {
+                const linkText = match[1];
+                const url = match[2];
+
+                const isMarkdown =
+                  linkText.toLowerCase().endsWith('.md') ||
+                  url.toLowerCase().endsWith('.md');
+
+                if (isMarkdown) {
+                  foundMdAttachment = {
+                    fileName: linkText,
+                    url
+                  };
+                  break;
+                }
+              }
+
+              if (foundMdAttachment) break;
+            }
+
+            if (!foundMdAttachment) {
+              level2Errors.push(
+                'Review File (.md attachment missing - attach it in a PR comment)'
+              );
+            } else {
+              // Security: only fetch URLs from trusted GitHub domains
+              // to prevent SSRF / token leakage.
+              const TRUSTED_HOSTS = [
+                'github.com',
+                'raw.githubusercontent.com',
+                'user-attachments.githubusercontent.com',
+                'objects.githubusercontent.com'
+              ];
+
+              let isTrustedUrl = false;
+
+              try {
+                const parsedUrl = new URL(foundMdAttachment.url);
+
+                isTrustedUrl = TRUSTED_HOSTS.some(host =>
+                  parsedUrl.hostname === host ||
+                  parsedUrl.hostname.endsWith('.' + host)
+                );
+              } catch (_) {
+                isTrustedUrl = false;
+              }
+
+              if (!isTrustedUrl) {
+                level2Errors.push(
+                  `Review File "${foundMdAttachment.fileName}" ` +
+                  `(Attachment URL must be from a trusted GitHub domain)`
+                );
+              } else {
+                try {
+                  core.info(
+                    `Found attachment candidate: ` +
+                    `${foundMdAttachment.fileName} -> ${foundMdAttachment.url}`
+                  );
+
+                  // Private-repo user-attachment URLs frequently reject
+                  // the Actions token. Do not retry - fall back to
+                  // structural verification below.
+                  const response = await github.rest.request(
+                    'GET ' + foundMdAttachment.url,
+                    {
+                      headers: { 'Accept': '*/*' },
+                      request: { retries: 0 }
+                    }
+                  );
+
+                  const content =
+                    typeof response.data === 'string'
+                      ? response.data.trim()
+                      : JSON.stringify(response.data || '').trim();
+
+                  if (!content) {
+                    level2Errors.push(
+                      `Review File "${foundMdAttachment.fileName}" ` +
+                      `(Attached file is empty / 0 bytes)`
+                    );
+                  } else {
+                    core.info(
+                      `Level 2 passed: ${foundMdAttachment.fileName} ` +
+                      `(${content.length} characters)`
+                    );
+                  }
+                } catch (err) {
+                  core.warning(
+                    'Could not download attachment body via API ' +
+                    '(expected on private repos): ' + err.message
+                  );
+
+                  if (
+                    !foundMdAttachment.fileName.toLowerCase().endsWith('.md') &&
+                    !foundMdAttachment.url.toLowerCase().endsWith('.md')
+                  ) {
+                    level2Errors.push(
+                      'Review File (Attachment must be a .md file)'
+                    );
+                  } else {
+                    core.info(
+                      'Attachment URL verified based on markdown link structure.'
+                    );
+                  }
+                }
+              }
+            }
+
+            // Level 2 has its own independent result.
+            const isLevel2Passed = level2Errors.length === 0;
+
+            if (isLevel2Passed) {
+              core.info('Level 2 Review attachment check PASSED.');
+            } else {
+              core.warning(
+                'Level 2 Review attachment check FAILED: ' +
+                level2Errors.join(', ')
+              );
+            }
+
+            // Overall enforcement still requires BOTH levels to pass.
+            const allValid = isLevel1Passed && isLevel2Passed;
+
+            const combinedErrors = [
+              ...level1Errors,
+              ...level2Errors
+            ];
+
+            // 4. Contextual banners
+            let bannerLines = [];
+            if (isSynchronize) {
+              bannerLines = [
+                '> [!WARNING]',
+                '> **New Commits Detected!**',
+                '> Previous PRTI data and review attachments have been marked as invalidated below. Please submit updated PRTI details and review `.md` file for this revision.',
+                ''
+              ];
+            } else if (context.eventName === 'issue_comment' && !allValid) {
+              bannerLines = [
+                '> [!WARNING]',
+                '> **Notice on your recent comment/edit/deletion:**',
+                '> Validation rules were re-evaluated. Some checks failed.',
+                ''
+              ];
+            }
+
+            let statusLines = [];
+
+            // ==========================================
+            // LEVEL 1 STATUS
+            // ==========================================
+            statusLines.push('### Level 1 — PRTI Check');
+
+            if (isLevel1Passed) {
+              statusLines.push('✅ **Passed**');
+              statusLines.push('All PRTI data fields are valid.');
+            } else {
+              statusLines.push('❌ **Failed**');
+              statusLines.push('');
+              statusLines.push('PRTI issues that need attention:');
+
+              for (const error of level1Errors) {
+                statusLines.push(`- **${error}**`);
+              }
+            }
+
+            statusLines.push('');
+
+            // ==========================================
+            // LEVEL 2 STATUS
+            // ==========================================
+            statusLines.push('### Level 2 — Review Checklist Check');
+
+            if (isLevel2Passed) {
+              statusLines.push('✅ **Passed**');
+              statusLines.push(
+                'A valid, non-empty review `.md` attachment was found.'
+              );
+            } else {
+              statusLines.push('❌ **Failed**');
+              statusLines.push('');
+              statusLines.push('Review checklist issues that need attention:');
+
+              for (const error of level2Errors) {
+                statusLines.push(`- **${error}**`);
+              }
+            }
+
+            statusLines.push('');
+            statusLines.push('---');
+            statusLines.push('');
+
+            // ==========================================
+            // OVERALL ENFORCEMENT STATUS
+            // ==========================================
+            statusLines.push('### Overall Enforcement');
+
+            if (allValid) {
+              statusLines.push('✅ **Passed**');
+              statusLines.push(
+                'Both Level 1 (PRTI) and Level 2 (Review Checklist) checks passed.'
+              );
+            } else {
+              statusLines.push('❌ **Failed**');
+              statusLines.push(
+                'This PR is **blocked from merging** until all failed checks are corrected.'
+              );
+            }
+
+            const bodyLines = [
+              MARKER,
+              '## PRTI & Review Process Enforcement',
+              '',
+              ...bannerLines,
+              'Hi @' + author + ' (or any reviewer), please ensure **PRTI details** and a **Review Process `.md` file** are provided in a **comment** on this PR.',
+              '',
+              '### Required Checklist:',
+              '1. **Level 1 (PRTI Format):**',
+              '```text',
+              'PR Time    : <enter time, e.g., 2h>',
+              'PR Defects : <enter defects count, e.g., 0>',
+              'TI Time    : <enter time, e.g., 1h>',
+              '```',
+              '2. **Level 2 (Review Attachment):** Attach a non-empty review document (e.g., `review_process.md`).',
+              '',
+              '| Level | Field| Validation Rule | Definition |',
+              '| :---: | :--- | :--- | :--- |',
+              '| **L1** | PR Time / TI Time | Accepted: `2h`, `30m`, `2h 30m`, `2hours`, `30minutes`, `45` (bare number = minutes) | **PR Time:** Total time spent for personal review. <br> **TI Time:** Time spent on Team inspection (TI) meeting, if meeting is not held `0` or `0h` can be entered. |',
+              '| **L1** | PR Defects | Must be a non-negative number (`0`, `1`) | Number of defects or issues found during personal review. |',
+              '| **L2** | Review File | Must attach a non-empty `.md` file | A markdown file containing the information about the review process. |',
+              '',
+              '---',
+              ...statusLines,
+              '',
+              '> Automated by the PRTI Enforcement workflow. Re-evaluates on new comments, edits, deletions, and commits.'
+            ];
+
+            const body = bodyLines.join('\n');
+
+            // 6. Update or create sticky comment
+            const existingSticky = comments.find(c => (c.body || '').includes(MARKER));
+            if (existingSticky) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existingSticky.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number: prNumber, body });
+            }
+
+            // 7. Commit status (drives merge blocking via branch protection)
+            const description = allValid
+              ? 'PRTI and Review attachment checks passed'
+              : ('Validation failed: ' + combinedErrors.join(', ')).slice(0, 140);
+
+            await github.rest.repos.createCommitStatus({
+              owner, repo, sha: headSha,
+              context: STATUS_CONTEXT,
+              state: allValid ? 'success' : 'failure',
+              description,
+              target_url: `https://github.com/${owner}/${repo}/pull/${prNumber}`
+            });
+
+            if (allValid) {
+              core.info('PRTI & Review checks complete - commit status set to success.');
+            } else {
+              core.warning('Validation incomplete/invalid. Issues: ' + combinedErrors.join(', '));
+            }
