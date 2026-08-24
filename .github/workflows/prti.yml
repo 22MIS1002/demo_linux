@@ -71,7 +71,7 @@ jobs:
             // and would hang forever on the required check.
             // Re-checked here because issue_comment events are NOT branch-filterable by YAML.
             const baseRef = pr.base.ref;
-            if (baseRef == 'main') {
+            if (baseRef !== 'main') {
               core.info(`Base branch '${baseRef}' is out of scope for PRTI enforcement. Skipping.`);
               return;
             }
