@@ -8,8 +8,7 @@ on:
       - synchronize
       - ready_for_review
     branches:
-      - develop
-      - release/**
+      - main
   issue_comment:
     types:
       - created
