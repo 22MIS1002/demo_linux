@@ -16,7 +16,7 @@ on:
       - deleted
 
 concurrency:
-  group: prti-enforcement-${{ github.event.pull_request.number || github.event.issue.number }}
+  group: prti-enforcement-${{ github.event.pull_request.number || github.event.issue.number || github.run_id }}
   cancel-in-progress: false
 
 jobs:
