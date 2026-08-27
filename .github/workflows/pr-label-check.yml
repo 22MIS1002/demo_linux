@@ -18,7 +18,7 @@ jobs:
       group: pr-${{ github.event.pull_request.number }}Expand commentComment on line R20Resolved
       cancel-in-progress: true
     
-    uses: 22MIS1002/demo-devops/.github/workflows/pr-label-check-reusable.yml@main
+    uses: 22MIS1002/demo-devops/.github/workflows/pr-label-check.yml@main
     with:
       pr_number: ${{ github.event.pull_request.number }}
       repo: ${{ github.event.repository.name }}
