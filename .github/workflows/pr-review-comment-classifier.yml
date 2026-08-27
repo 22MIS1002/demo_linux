@@ -1,0 +1,17 @@
+name: PR Review Comment Classifier
+
+on:
+  pull_request_review_comment:
+    types: [created, edited]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  classify:
+    uses: 22MIS1002/demo_devops/.github/workflows/pr-review-comment-classifier.yml@main 
+    with:
+      owner: ${{ github.event.repository.owner.login }}
+      repo: ${{ github.event.repository.name }}
+      pr_number: ${{ github.event.pull_request.number }}
+      comment_id: ${{ github.event.comment.id }}
