@@ -15,7 +15,7 @@ permissions:
 jobs:
   check-label:
     concurrency:          
-      group: pr-${{ github.event.pull_request.number }}Expand commentComment on line R20Resolved
+      group: pr-${{ github.event.pull_request.number }}
       cancel-in-progress: true
     
     uses: 22MIS1002/demo_devops/.github/workflows/pr-label-check.yml@main
