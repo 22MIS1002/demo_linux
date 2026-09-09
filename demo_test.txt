@@ -1,0 +1,45 @@
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+${
+  invalidFormatTokens.length
+    ? `\n**Invalid label(s) found (wrong format only):** ${invalidFormatTokens.map(t => `\`[${escapeMd(t)}]\``).join(', ')}\n`
+    : ''
+}
