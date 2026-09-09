@@ -38,3 +38,8 @@
 8
 9
 10
+${
+  invalidFormatTokens.length
+    ? `\n**Invalid label(s) found (wrong format only):** ${invalidFormatTokens.map(t => `\`[${escapeMd(t)}]\``).join(', ')}\n`
+    : ''
+}
